@@ -298,6 +298,11 @@ func (r *reconciler) verifyRouterAssetExists(key types.NamespacedName, desired r
 	}
 
 	if matcherFunc != nil && !matcherFunc(current, desired) {
+		logrus.Infof("router asset %T did not match expected", desired)
+		if 2 == 1 {
+			logrus.Infof("*****  disabling router asset update")
+			return current, nil
+		}
 		if err := r.Client.Update(context.TODO(), desired); err != nil {
 			return nil, err
 		}
@@ -361,12 +366,15 @@ func (r *reconciler) ensureRouterNamespaceAsset() error {
 		ns2 := obj2.(*corev1.Namespace)
 
 		if !reflect.DeepEqual(ns1.Labels, ns2.Labels) {
+			logrus.Infof("Namespace labels mismatch: %+v != %+v", ns1.Labels, ns2.Labels)
 			return false
 		}
 		if !reflect.DeepEqual(ns1.Annotations, ns2.Annotations) {
+			logrus.Infof("Namespace annotations mismatch: %+v != %+v", ns1.Annotations, ns2.Annotations)
 			return false
 		}
 
+		logrus.Infof("Namespace assets match, no updates needed")
 		return true
 	}
 
@@ -386,24 +394,84 @@ func (r *reconciler) ensureRouterDeployment(ci *ingressv1alpha1.ClusterIngress) 
 		return nil, fmt.Errorf("failed to build router deployment: %v", err)
 	}
 
-	clusterIngressMatcher := func(obj1, obj2 runtime.Object) bool {
-		ci1 := obj1.(*appsv1.Deployment)
-		ci2 := obj2.(*appsv1.Deployment)
+	deploymentMatcher := func(obj1, obj2 runtime.Object) bool {
+		d1 := obj1.(*appsv1.Deployment)
+		d2 := obj2.(*appsv1.Deployment)
 
-		if !reflect.DeepEqual(ci1.Labels, ci2.Labels) {
+		if !reflect.DeepEqual(d1.Labels, d2.Labels) {
+			logrus.Infof("Deployment labels mismatch: %+v != %+v", d1.Labels, d2.Labels)
 			return false
 		}
-		if !reflect.DeepEqual(ci1.Annotations, ci2.Annotations) {
+
+		// We can't just compare the two deployment Specs as there are
+		// fields that get populated post creation in addition to
+		// the api server filling in some defaults.
+		// E.g. SchedulerName, Probe.FailureThreshold, TerminationMessagePath
+		if !reflect.DeepEqual(d1.Spec.Template.Labels, d2.Spec.Template.Labels) {
+			logrus.Infof("Deployment template labels mismatch: %+v != %+v", d1.Spec.Template.Labels, d2.Spec.Template.Labels)
 			return false
 		}
-		if !reflect.DeepEqual(ci1.Spec, ci2.Spec) {
+		if !reflect.DeepEqual(d1.Spec.Selector.MatchLabels, d2.Spec.Selector.MatchLabels) {
+			logrus.Infof("Deployment selector match labels mismatch: %+v != %+v", d1.Spec.Selector.MatchLabels, d2.Spec.Selector.MatchLabels)
 			return false
 		}
+		if !reflect.DeepEqual(d1.Spec.Template.Spec.NodeSelector, d2.Spec.Template.Spec.NodeSelector) {
+			logrus.Infof("Deployment template node selector mismatch: %+v != %+v", d1.Spec.Template.Spec.NodeSelector, d2.Spec.Template.Spec.NodeSelector)
+			return false
+		}
+
+		nReplicas1 := int32(0)
+		if d1.Spec.Replicas != nil {
+			nReplicas1 = *d1.Spec.Replicas
+		}
+		nReplicas2 := int32(0)
+		if d2.Spec.Replicas != nil {
+			nReplicas2 = *d2.Spec.Replicas
+		}
+		if nReplicas1 != nReplicas2 {
+			logrus.Infof("Deployment replicas size mismatch: %v != %v", nReplicas1, nReplicas2)
+			return false
+		}
+
+		numContainers1 := len(d1.Spec.Template.Spec.Containers)
+		numContainers2 := len(d2.Spec.Template.Spec.Containers)
+		if numContainers1 == 0 || numContainers2 == 0 || numContainers1 != numContainers2 {
+			logrus.Infof("Deployment template containers size zero or mismatch: %v, %v", numContainers1, numContainers2)
+			return false
+		}
+		if !reflect.DeepEqual(d1.Spec.Template.Spec.Containers[0].Env, d2.Spec.Template.Spec.Containers[0].Env) {
+			logrus.Infof("Deployment template containers env mismatch: %+v != %+v", d1.Spec.Template.Spec.Containers[0].Env, d2.Spec.Template.Spec.Containers[0].Env)
+			return false
+		}
+		if d1.Spec.Template.Spec.Containers[0].Image != d2.Spec.Template.Spec.Containers[0].Image {
+			logrus.Infof("Deployment template containers image mismatch: %q != %q", d1.Spec.Template.Spec.Containers[0].Image, d2.Spec.Template.Spec.Containers[0].Image)
+			return false
+		}
+		if d1.Spec.Template.Spec.Containers[0].LivenessProbe.Handler.HTTPGet.Host != d2.Spec.Template.Spec.Containers[0].LivenessProbe.Handler.HTTPGet.Host {
+			logrus.Infof("Deployment template containers liveness probe host mismatch: %q != %q", d1.Spec.Template.Spec.Containers[0].LivenessProbe.Handler.HTTPGet.Host, d2.Spec.Template.Spec.Containers[0].LivenessProbe.Handler.HTTPGet.Host)
+			return false
+		}
+		if d1.Spec.Template.Spec.Containers[0].ReadinessProbe.Handler.HTTPGet.Host != d2.Spec.Template.Spec.Containers[0].ReadinessProbe.Handler.HTTPGet.Host {
+			logrus.Infof("Deployment template containers readiness probe host mismatch: %q != %q", d1.Spec.Template.Spec.Containers[0].ReadinessProbe.Handler.HTTPGet.Host, d2.Spec.Template.Spec.Containers[0].ReadinessProbe.Handler.HTTPGet.Host)
+			return false
+		}
+
+		numVolumes1 := len(d1.Spec.Template.Spec.Volumes)
+		numVolumes2 := len(d2.Spec.Template.Spec.Volumes)
+		if numVolumes1 == 0 || numVolumes2 == 0 || numVolumes1 != numVolumes2 {
+			logrus.Infof("Deployment template volumes size zero or mismatch: %v, %v", numVolumes1, numVolumes2)
+			return false
+		}
+		if d1.Spec.Template.Spec.Volumes[0].Secret.SecretName != d2.Spec.Template.Spec.Volumes[0].Secret.SecretName {
+			logrus.Infof("Deployment template volumes secret name mismatch: %q, %q", d1.Spec.Template.Spec.Volumes[0].Secret.SecretName, d2.Spec.Template.Spec.Volumes[0].Secret.SecretName)
+			return false
+		}
+		logrus.Infof("Deployment assets match, no updates needed")
 		return true
 	}
 
 	key := types.NamespacedName{Namespace: deployment.Namespace, Name: deployment.Name}
-	actual, err := r.verifyRouterAssetExists(key, deployment, clusterIngressMatcher)
+	actual, err := r.verifyRouterAssetExists(key, deployment, deploymentMatcher)
 	if err != nil {
 		return nil, err
 	}
